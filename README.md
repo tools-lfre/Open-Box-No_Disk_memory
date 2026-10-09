@@ -307,12 +307,4 @@ curl -fsSL https://raw.githubusercontent.com/liandu2024/Open-Box/main/scripts/un
 
 本仓库公开安装、升级和卸载所需脚本、界面说明图片及发布资产。面板和内核的许可证与版权信息随安装包提供。
 
-## Star 增长
-
-<a href="https://www.star-history.com/#liandu2024/open-box&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=liandu2024/open-box&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=liandu2024/open-box&type=Date" />
-    <img alt="Open-Box Star 增长图" src="https://api.star-history.com/svg?repos=liandu2024/open-box&type=Date" />
-  </picture>
-</a>
+## 请使用支持原作者的最新版本，这里仅仅只是备份自用。谢谢。
