@@ -3,6 +3,8 @@
   <img src="docs/pic/logo.png" alt="Open-Box" height="72">
 </picture>
 
+## 仅仅是个人备份学习，具体请去看原作者。
+
 路由器 / 主机上的一体化透明代理：安装包内置 Open-Box、sing-box 内核、Node 运行时以及完整 GeoSite / GeoIP 数据，安装后通过浏览器完成订阅、节点、分流、DNS 和防火墙设置，不需要手写配置文件。
 
 **支持的平台**
