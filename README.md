@@ -211,6 +211,21 @@ curl -fsSL https://gh-proxy.com/raw.githubusercontent.com/liandu2024/Open-Box/ma
 安装要求：OpenWrt（iStoreOS 22.03、OpenWrt 22.03 及更早的固件太老装不了，请先升级到 iStoreOS 24 / OpenWrt 24 以上）、x86_64 或 aarch64、至少 512MB 存储空间和 512MB 内存。安装 / 升级脚本会检查并尝试用 opkg 或 apk 补齐系统依赖（kmod-tun、kmod-nft-queue、kmod-nft-nat、kmod-veth、ip-full、ca-bundle）；软件源不通时只提示、不中断，可稍后按提示手动安装，设 `OPENBOX_SKIP_DEPS=1` 可跳过这一步。安装完成后，用浏览器打开脚本提示的 `http://<路由器局域网 IP>:<面板端口>` 地址，首次访问设置管理密码。
 
 安装完成后，用浏览器打开 `http://<路由器 LAN 地址>:<面板端口>`（安装脚本结束时会打印这个地址），**首次打开时设置面板密码**。以后忘了密码不用重装，见下面的[忘记面板密码](#忘记面板密码)。
+## 安装（自有链接测试）-非正式
+SSH 以 root 登录 OpenWrt 路由器后执行：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tools-lfre/Open-Box/main/scripts/install.sh | sh
+```
+
+GitHub 访问不畅时，需要先通过可访问的 raw 镜像获取安装脚本，再让脚本使用镜像下载发布包：
+
+```sh
+curl -fsSL https://gh-proxy.com/raw.githubusercontent.com/tools-lfre/Open-Box/main/scripts/install.sh | sh -s -- --mirror
+```
+
+`--mirror` 只控制安装包下载；如最外层的 `raw.githubusercontent.com` 本身无法访问，直接在原地址后追加 `--mirror` 仍无法取得脚本。
+
 
 ### Debian / Ubuntu
 
