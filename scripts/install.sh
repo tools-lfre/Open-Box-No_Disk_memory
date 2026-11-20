@@ -1,5 +1,10 @@
 #!/bin/sh
 # Open-Box 一键安装脚本(POSIX sh,兼容 OpenWrt ash 与 Debian dash;不使用 bash 专有语法)。
+# 【本地定制】基于上游 v0.1.467 修改:硬件(存储/内存)低于建议值时不再拒绝安装,
+#   改为"醒目提醒 + 倒计时后自动继续";只保留"读不到数值"这类真正的环境错误为致命错误。
+#   倒计时秒数可用环境变量 OPENBOX_HW_WARN_WAIT 覆盖(设为 0 表示只提醒不等待)。
+#   注意:上游更新后本补丁需重新应用。检查点:check_storage()/check_memory() 内
+#   应调用 warn_blocking 而不是 die。
 # 支持 OpenWrt 路由器,以及 Debian / Ubuntu(systemd;见下方 detect_platform 的说明)。
 #
 # 用法:
@@ -28,18 +33,16 @@ umask 022
 
 REPO="liandu2024/Open-Box"
 INSTALL_ROOT="/opt/open-box"
-# OpenWrt 的 /tmp 通常是 tmpfs，会把下载包直接计入运行内存。完整安装包约
-# 106MB，低内存路由器在面板/内核已经运行时下载它可能触发 OOM，表现为“死机”。
+# OpenWrt 的 /tmp 通常是 tmpfs，会把下载包直接计入运行内存。
 # 下载临时目录默认放在 /opt 所在的持久化文件系统；需要时可用 OPENBOX_TMPDIR
 # 明确指定其它可写目录（例如外接存储）。校验通过前仍不会写入安装目录本身。
 # TMP_PARENT 在下面用 openbox_pick_tmp_parent 现挑(见那一段的说明),这里先留空
 TMP_PARENT=""
-MIN_FREE_KB=$((512 * 1024))
-# 450000KB(≈440MB)而不是标称的 512*1024:512MB 设备的 /proc/meminfo MemTotal 实测
-# 只有约 480-500MB(内核保留了一部分),用 524288 卡阈值会把 README 宣称支持的
-# 最低配机器自己拒之门外。README 的"≥512MB 内存"说的是标称容量,不是这里的检测
-# 阈值,两者故意不一致(P6 终审 Important 2)。
-MIN_MEM_KB=450000
+MIN_FREE_KB=$((256 * 1024))
+# 210000KB(≈205MB)而不是标称的 256*1024:256MB 设备的 /proc/meminfo MemTotal 实测
+# 只有约 220-248MB(内核保留了一部分),用 262144 卡阈值会把 README 宣称支持的
+# 最低配机器自己拒之门外。README 的"≥256MB 内存"说的是标称容量,不是这里的检测阈值。
+MIN_MEM_KB=210000
 
 CHANNEL="direct"
 MIRROR_PREFIX=""
@@ -169,7 +172,7 @@ cleanup_partial_install() {
   else
     rm -f /etc/init.d/openbox /etc/init.d/openbox-panel
     rm -rf /www/luci-static/resources/view/openbox /tmp/luci-*cache* 2>/dev/null || true
-    rm -f /usr/share/luci/menu.d/luci-app-openbox.json /usr/share/rpcd/acl.d/luci-app-openbox.json
+    rm -f /usr/share/luci/menu.d/luci-app-openbox.json /usr/share/rpcd/acl.d/luci-app-openbox.json /usr/lib/lua/luci/controller/openbox_compat.lua
   fi
   if [ -n "${CLI_LINK:-}" ] && [ -L "$CLI_LINK" ] && [ "$(readlink "$CLI_LINK" 2>/dev/null)" = "$INSTALL_ROOT/openwrt/bin/open-box" ]; then
     rm -f "$CLI_LINK"
@@ -189,6 +192,35 @@ die() {
   drain_stdin
   exit 1
 }
+
+# ---- 硬件限制降级补丁:start ----
+# 打印带边框的醒目提醒块(检测值 / 建议值 / 风险 / 回退方式),倒计时结束后自动继续。
+# 不读任何输入:常规用法是 `curl ... | sh`,此时 stdin 是管道而非终端,任何
+# "请输入 y 继续"的设计都会立刻读到 EOF 而失败,与"取消限制、让用户装得上"的目的相反。
+# 倒计时期间按 Ctrl-C 仍可中止;秒数可用环境变量 OPENBOX_HW_WARN_WAIT 覆盖,0 表示只提醒不等待。
+warn_blocking() {
+  _wb_title="$1"; _wb_got="$2"; _wb_want="$3"; _wb_risk="$4"
+  _wb_wait=${OPENBOX_HW_WARN_WAIT:-5}
+  echo "" >&2
+  echo "========================================================" >&2
+  echo "[open-box] 注意:$1" >&2
+  echo "  检测值:$2" >&2
+  echo "  建议值:$3" >&2
+  echo "  风险:$4" >&2
+  echo "  继续安装后若想回退,可运行卸载脚本:" >&2
+  echo "    curl -fsSL https://raw.githubusercontent.com/liandu2024/Open-Box/main/scripts/uninstall.sh | sh -s -- --purge" >&2
+  if [ "$_wb_wait" -gt 0 ] 2>/dev/null; then
+    echo "  ${_wb_wait} 秒后自动继续安装,按 Ctrl-C 可中止。" >&2
+    _wb_i=0
+    while [ "$_wb_i" -lt "$_wb_wait" ]; do
+      _wb_i=$((_wb_i + 1))
+      sleep 1
+    done
+  fi
+  echo "========================================================" >&2
+  return 0
+}
+# ---- 硬件限制降级补丁:end ----
 
 usage() {
   cat <<'EOF'
@@ -374,7 +406,11 @@ check_storage() {
     ''|*[!0-9]*) die "无法检测可用存储空间(df 命令输出异常)。" ;;
   esac
   if [ "$kb" -lt "$MIN_FREE_KB" ]; then
-    die "可用存储不足:检测到约 $((kb / 1024))MB,Open-Box 至少需要 512MB 可用空间。请清理存储后重试。"
+    # 【本地定制】低于建议值不再 die 拒绝安装,降级为醒目提醒后继续
+    warn_blocking "可用存储低于建议值" \
+      "约 $((kb / 1024))MB 可用" \
+      "建议至少 $((MIN_FREE_KB / 1024))MB 可用空间" \
+      "安装包约百余 MB,空间不足时下载/解包可能中途失败(curl 报错 23 常见于此);失败不会破坏现有数据。"
   fi
 }
 
@@ -385,7 +421,11 @@ check_memory() {
     ''|*[!0-9]*) die "无法解析 /proc/meminfo 中的内存信息。" ;;
   esac
   if [ "$mem_kb" -lt "$MIN_MEM_KB" ]; then
-    die "内存不足:检测到约 $((mem_kb / 1024))MB,Open-Box 至少需要 512MB 内存。"
+    # 【本地定制】低于建议值不再 die 拒绝安装,降级为醒目提醒后继续
+    warn_blocking "内存低于建议值" \
+      "约 $((mem_kb / 1024))MB" \
+      "建议标称内存至少 256MB" \
+      "内存偏小时面板/内核可能运行缓慢或被内核 OOM 杀掉;装完后如不稳定可卸载回退。"
   fi
 }
 
@@ -465,7 +505,6 @@ ENV_REPORT_ON=1
 info "开始预检..."
 check_root
 detect_platform
-[ "$PLATFORM" = "systemd" ] || ! openbox_musl_too_old || die "$(openbox_old_firmware_message)"
 map_arch
 check_storage
 check_memory
@@ -516,7 +555,7 @@ info "面板端口:$PANEL_PORT"
 # 终端)。这里按"功能是否可用"检查(模块可能直接编进内核,不看包名),缺的就地用 opkg / apk 装;装不上
 # 只警告不中断——面板和内核在缺项下各有明确提示,不该因为软件源不通就装不了 Open-Box。
 #   kmod-tun           tun 设备,内核起不来的硬要求
-#   kmod-nft-queue     auto_redirect(nftables 转发)的 queue 表达式,缺了内核退到纯 tun 兼容模式
+#   kmod-nft-queue     首包预判的 queue 表达式,缺了只关闭预判,仍保留 auto_redirect
 #   kmod-nft-nat       auto_redirect 的 redirect 表达式(fw4 默认自带,顺手核对)
 #   kmod-veth ip-full  规则页「真实路由 · 模拟 LAN 终端」要建网络命名空间和 veth
 #   ca-bundle          HTTPS 证书(订阅、更新下载)
@@ -532,9 +571,8 @@ dep_ok() {
     kmod-veth) [ -d "$DEP_SYS_MODULE/veth" ] || modprobe veth >/dev/null 2>&1 ;;
     ip-full) ip netns list >/dev/null 2>&1 ;;
     ca-bundle) [ -s "$DEP_CA_BUNDLE" ] ;;
-    # 下面两个只在 Debian / Ubuntu 上检查:nft 命令装 Open-Box 自己的表,xz 解 nodejs.org 的 Node 包
+    # 下面这项只在 Debian / Ubuntu 上检查:nft 命令装 Open-Box 自己的表
     nftables) command -v nft >/dev/null 2>&1 ;;
-    xz-utils) command -v xz >/dev/null 2>&1 ;;
     *) return 0 ;;
   esac
 }
@@ -551,20 +589,15 @@ dep_pkg() {
 dep_effect() {
   case "$1" in
     kmod-tun) echo "内核起不来(没有 tun 设备)" ;;
-    # 2026-09-30 开发路由器实测(内核 1.14.1 / sing-tun 0.9.3):两个 queue 模块都没有时 nftables 转发照常,只关掉首包预判;
-    # 有 nfnetlink_queue、缺 nft_queue 时 nft 规则装不上,内核自动降级纯 tun
+    # queue 是首包预判的可选能力;tcp31 已单独探测表达式,不可用时仍保留 auto_redirect。
+    # 核心自用的上游 DNS 由 entry-bypass 的 output 防循环规则保护,与预判无关。
     kmod-nft-queue)
-      if [ -d "$DEP_SYS_MODULE/nfnetlink_queue" ] || modprobe nfnetlink_queue >/dev/null 2>&1; then
-        echo "nftables 转发起不来,内核会自动改用纯 tun 兼容模式,吞吐低一些"
-      else
-        echo "只影响入口的「首包预判放行」(直连终端、节点地址的连接先进内核再直连出去),nftables 转发和其它功能照常"
-      fi
+      echo "只影响入口的「首包预判放行」,仍保留 nftables 转发;内核自用 DNS 由防循环规则保护"
       ;;
     kmod-nft-nat) echo "auto_redirect 转发规则加不上,退到兼容模式" ;;
     kmod-veth|ip-full) echo "规则页不能模拟 LAN 终端(可改用内核诊断)" ;;
     ca-bundle) echo "HTTPS 订阅和更新下载会因证书校验失败" ;;
     nftables) echo "起内核前装不上 Open-Box 自己的 nft 表(进内核前放行 / 直连应答放行不生效)" ;;
-    xz-utils) echo "解不开 nodejs.org 的 Node 压缩包,面板跑不起来" ;;
   esac
 }
 # 各包管理器的软件源配置在哪(提示用)
@@ -582,7 +615,7 @@ ensure_dependencies() {
     return 0
   fi
   _dep_all="kmod-tun kmod-nft-queue kmod-nft-nat kmod-veth ip-full ca-bundle"
-  [ "${PLATFORM:-openwrt}" = "systemd" ] && _dep_all="$_dep_all nftables xz-utils"
+  [ "${PLATFORM:-openwrt}" = "systemd" ] && _dep_all="$_dep_all nftables"
   _dep_missing=""
   for _d in $_dep_all; do dep_ok "$_d" || _dep_missing="$_dep_missing $_d"; done
   if [ -z "$_dep_missing" ]; then
@@ -765,16 +798,53 @@ detect_downloader
 # 下载带版本号的资产:每个版本 URL 唯一,加速镜像缓存了上一版同名的稳定资产也串不过来
 # (update.sh 里有同样的处理和真机踩坑记录)。直连探不到、走的是镜像通道时再经镜像问一次(选好镜像之后,
 # 见下方;和 update.sh 一样,审查第六项),还拿不到才退回稳定资产名。
+# ---- openbox-router-release:start ----
+# GitHub Latest 可能是仅发布客户端的版本。只接受带独立升级脚本校验文件的
+# 路由器正式版；Latest 不符合时，从公开 Release feed 中按版本倒序查找。
+# 使用 github.com 页面及资产，镜像无需支持 api.github.com，也不依赖 JSON 工具。
 resolve_latest_tag_from() {
   case "$DOWNLOADER" in
-    curl) curl -sI --connect-timeout 8 --max-time 12 "$1" 2>/dev/null ;;
-    # OpenWrt 自带的 wget 是 uclient-fetch,没有 -S / --max-redirect(错误会被吞掉,
-    # 静默退回稳定资产名,镜像缓存旧包的问题就回来了):改为跟着 302 把 releases/latest
-    # 的页面拉下来,从里面的 /releases/tag/<tag> 链接取版本号
-    # 页面里还有 /releases/tag/*name 这种模板链接,只认 v 开头的版本号
-    wget) wget -q -O - --timeout=12 "$1" 2>/dev/null | sed -n 's|.*/releases/tag/\(v[0-9][0-9A-Za-z._-]*\).*|\1|p' | head -n 1 ;;
+    curl) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" curl -sI --connect-timeout 8 --max-time 12 "$1" 2>/dev/null ;;
+    wget) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" wget -q -O - --timeout=12 "$1" 2>/dev/null | sed -n 's|.*/releases/tag/\(v[0-9][0-9A-Za-z._-]*\).*|\1|p' | head -n 1 ;;
   esac | sed -n 's/^[Ll]ocation: .*\/releases\/tag\/\(v[0-9][0-9A-Za-z._-]*\).*/\1/p; /^v[0-9][0-9A-Za-z._-]*$/p' | head -n 1
 }
+router_release_text() {
+  case "$DOWNLOADER" in
+    curl) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" curl -fsSL --connect-timeout 8 --max-time 20 "$1" ;;
+    wget) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" wget -q -O - --timeout=20 "$1" ;;
+  esac
+}
+router_release_available() {
+  printf '%s\n' "$2" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || return 1
+  _rr_sha=$(router_release_text "$1/releases/download/$2/update.sh.sha256" 2>/dev/null) || return 1
+  printf '%s\n' "$_rr_sha" | awk '
+    NR == 1 { name = $2; sub(/^\*/, "", name); ok = NF == 2 && length($1) == 64 && $1 !~ /[^0-9a-fA-F]/ && name == "update.sh" }
+    NR > 1 && NF { ok = 0 }
+    END { exit !ok }'
+}
+resolve_router_release_tag() {
+  _rr_base=${1%/releases/latest}
+  _rr_latest=$(resolve_latest_tag_from "$1")
+  if router_release_available "$_rr_base" "$_rr_latest"; then
+    printf '%s\n' "$_rr_latest"
+    return 0
+  fi
+  _rr_feed=$(router_release_text "$_rr_base/releases.atom" 2>/dev/null) || return 1
+  _rr_tags=$(printf '%s\n' "$_rr_feed" | tr '"' '\n' \
+    | sed -n 's|.*/releases/tag/\(v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' \
+    | awk '!seen[$0]++' \
+    | awk -F. '{ printf "%010d.%010d.%010d %s\n", substr($1, 2), $2, $3, $0 }' \
+    | sort -r | awk '{ print $2 }')
+  for _rr_tag in $_rr_tags; do
+    [ "$_rr_tag" != "$_rr_latest" ] || continue
+    if router_release_available "$_rr_base" "$_rr_tag"; then
+      printf '%s\n' "$_rr_tag"
+      return 0
+    fi
+  done
+  return 1
+}
+# ---- openbox-router-release:end ----
 LATEST_URL="https://github.com/$REPO/releases/latest"
 # 先直连探;探不到说明直连 GitHub 不通(后面的校验文件也就不先试直连),镜像通道时再经镜像问
 resolve_latest_tag_now() {
@@ -790,11 +860,11 @@ resolve_latest_tag_now() {
     LATEST_TAG="$OPENBOX_INSTALL_VERSION"
     return 0
   fi
-  LATEST_TAG=$(resolve_latest_tag_from "$LATEST_URL")
+  LATEST_TAG=$(resolve_router_release_tag "$LATEST_URL") || LATEST_TAG=""
   if [ -z "$LATEST_TAG" ]; then
     TRUSTED_DIRECT_BROKEN=1
     if [ "$CHANNEL" = "mirror" ] && [ -n "$MIRROR_PREFIX" ]; then
-      LATEST_TAG=$(resolve_latest_tag_from "$(build_url "$LATEST_URL")")
+      LATEST_TAG=$(resolve_router_release_tag "$(build_url "$LATEST_URL")") || LATEST_TAG=""
     fi
   fi
   case "$LATEST_TAG" in
@@ -866,9 +936,23 @@ probe_mirror_prefix() {
   candidate="$1"
   probe_file="$TMP_DL/.mirror-probe"
   rm -f "$probe_file"
-  MIRROR_PREFIX="$candidate"
-  probe_url=$(build_url "$SHA_URL")
+  if [ "$candidate" = "direct" ]; then
+    CHANNEL="direct"
+    MIRROR_PREFIX=""
+  else
+    CHANNEL="mirror"
+    MIRROR_PREFIX="$candidate"
+  fi
+  _pm_sha_url="$SHA_URL"
+  case "$_pm_sha_url" in
+    */releases/latest/download/*)
+      _pm_tag=$(resolve_router_release_tag "$(build_url "https://github.com/$REPO/releases/latest")") || return 1
+      _pm_sha_url="https://github.com/$REPO/releases/download/$_pm_tag/$ASSET.sha256"
+      ;;
+  esac
+  probe_url=$(build_url "$_pm_sha_url")
   if ! fetch_to_file_probe "$probe_url" "$probe_file" 2>/dev/null; then
+    # 失败只说明这个来源不可用；不能丢弃当前内核代理或改动正在使用的 DNS。
     rm -f "$probe_file"
     return 1
   fi
@@ -1105,25 +1189,46 @@ openbox_node_smoke() {
 }
 # ---- openbox-node-smoke:end ----
 
-# 校验、解包都已完成,此时读取的版本号就是实际装上的版本号(见上面 Important 5 的
-# 说明:不再从 GitHub API 的 tag_name 提前拿版本号)。
+# ---- openbox-panel-smoke:start ----
+# 这一段在 install.sh / update.sh 两份里一模一样:
+# 纯静态 Go 面板(bin/openbox-panel)直接执行 version 冒烟;兼容老版 Node 安装包(无 bin/openbox-panel 但有 node/bin/node)时走 Node 冒烟。
+openbox_panel_smoke() {
+  _ob_root="${1:-$INSTALL_ROOT}"
+  if [ -x "$_ob_root/bin/openbox-panel" ]; then
+    _ob_out=$("$_ob_root/bin/openbox-panel" version 2>&1) || {
+      echo "$_ob_out" | head -n 5
+      return 1
+    }
+    case "$_ob_out" in
+      "openbox-panel "*) return 0 ;;
+    esac
+    echo "$_ob_out" | head -n 5
+    return 1
+  fi
+  openbox_node_smoke "$_ob_root"
+}
+# ---- openbox-panel-smoke:end ----
+
+# 校验、解包都已完成,此时读取的版本号就是实际装上的版本号
 VERSION=$(sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p' "$INSTALL_ROOT/meta.json" 2>/dev/null | head -n 1)
 [ -n "$VERSION" ] || VERSION="未知版本"
 
-if [ "$PLATFORM" = "systemd" ]; then
-  info "Debian / Ubuntu:下载 glibc 版 Node 运行时(发布包里的是 OpenWrt 用的 musl 版)..."
+if [ ! -x "$INSTALL_ROOT/bin/openbox-panel" ] && [ -d "$INSTALL_ROOT/node" ] && [ "$PLATFORM" = "systemd" ]; then
+  info "Debian / Ubuntu:下载 glibc 版 Node 运行时(旧版发布包)..."
   if ! _gn_err=$(openbox_glibc_node "$INSTALL_ROOT"); then
     [ -n "$_gn_err" ] && printf '%s\n' "$_gn_err" >&2
     die "glibc 版 Node 没装上,面板跑不起来,安装中止。请检查能否访问 nodejs.org 或 npmmirror.com 后重新运行安装脚本。"
   fi
 fi
 
-info "检查随包 Node 能否运行..."
-if ! _ob_node_err=$(openbox_node_smoke); then
-  warn "随包的 Node 在这台设备上起不来:"
-  [ -n "$_ob_node_err" ] && printf '%s\n' "$_ob_node_err" >&2
-  case "$_ob_node_err" in *"symbol not found"*) die "$(openbox_old_firmware_message)" ;; esac
-  openbox_musl_too_old && die "$(openbox_old_firmware_message)"
+info "检查面板程序能否运行..."
+if ! _ob_panel_err=$(openbox_panel_smoke "$INSTALL_ROOT"); then
+  warn "随包的面板程序在这台设备上起不来:"
+  [ -n "$_ob_panel_err" ] && printf '%s\n' "$_ob_panel_err" >&2
+  if [ ! -x "$INSTALL_ROOT/bin/openbox-panel" ]; then
+    case "$_ob_panel_err" in *"symbol not found"*) die "$(openbox_old_firmware_message)" ;; esac
+    openbox_musl_too_old && die "$(openbox_old_firmware_message)"
+  fi
   die "面板跑不起来,安装中止。请把上面几行连同 \`uname -a\`、\`cat /etc/openwrt_release\`、\`head -3 /proc/meminfo\` 一起发到 GitHub issue。"
 fi
 
@@ -1175,6 +1280,10 @@ mkdir -p /usr/share/luci/menu.d || die "无法创建 LuCI 菜单目录。"
 cp "$INSTALL_ROOT/openwrt/luci/root/usr/share/luci/menu.d/luci-app-openbox.json" \
   /usr/share/luci/menu.d/luci-app-openbox.json || die "无法安装 LuCI 菜单文件。"
 chmod 644 /usr/share/luci/menu.d/luci-app-openbox.json 2>/dev/null || true
+if [ -f "$INSTALL_ROOT/openwrt/bin/luci-compat.sh" ]; then
+  . "$INSTALL_ROOT/openwrt/bin/luci-compat.sh"
+  openbox_install_luci_compat "$INSTALL_ROOT" || warn "无法安装 Lua LuCI 兼容入口,请直接访问 Open-Box 面板。"
+fi
 
 mkdir -p /usr/share/rpcd/acl.d || die "无法创建 rpcd ACL 目录。"
 # 先比对再覆盖:重启 rpcd 会清空它内存里的全部 LuCI 会话(等于把人踢回登录页),
