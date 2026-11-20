@@ -32,9 +32,10 @@ set -eu
 umask 022
 
 # ---- 本地定制:仓库指向自己,彻底摆脱原作者仓库 ----
-# 默认从自己的镜像仓库取安装包;可用 OPENBOX_REPO=owner/repo 覆盖(例如指向另一个自建镜像)。
+# 默认从 Open-Box-No_Disk_memory 仓库取安装包(其 Latest=v0.1.301,跟随 Latest 自动升级);
+# 可用 OPENBOX_REPO=owner/repo 覆盖指向其它镜像。
 # 完全离线时用 OPENBOX_LOCAL_ASSET=<本地 tar.gz 绝对路径> 直接安装,跳过所有网络请求。
-REPO="${OPENBOX_REPO:-tools-lfre/Open-Box}"
+REPO="${OPENBOX_REPO:-tools-lfre/Open-Box-No_Disk_memory}"
 INSTALL_ROOT="/opt/open-box"
 # OpenWrt 的 /tmp 通常是 tmpfs，会把下载包直接计入运行内存。
 # 下载临时目录默认放在 /opt 所在的持久化文件系统；需要时可用 OPENBOX_TMPDIR
@@ -47,7 +48,9 @@ MIN_FREE_KB=$((256 * 1024))
 # 最低配机器自己拒之门外。README 的"≥256MB 内存"说的是标称容量,不是这里的检测阈值。
 MIN_MEM_KB=210000
 
-CHANNEL="direct"
+# 下载通道:默认直连(校验和来自 GitHub 本身,最可信);国内慢速网络卡在下载时,
+# 设 OPENBOX_CHANNEL=mirror 走内置加速镜像(ghfast/gh-proxy/llkk),速度显著提升。
+CHANNEL="${OPENBOX_CHANNEL:-direct}"
 MIRROR_PREFIX=""
 
 # ---------- 基础输出 ----------
@@ -1076,7 +1079,7 @@ while :; do
     break
   fi
   fetch_to_file_trusted "$SHA_URL" "$TMP_DL/$ASSET.sha256.pre" || die "下载校验文件失败:$SHA_URL"
-  info "下载发布包:$ASSET"
+  info "下载发布包:$ASSET(约 72-76MB,慢速网络需几分钟,静默无进度属正常,请勿中断)"
   download_asset "$ASSET_URL" "$TMP_DL/$ASSET" || die "下载安装包失败(内置镜像和直连都试过了):$ASSET_URL"
   fetch_to_file_trusted "$SHA_URL" "$TMP_DL/$ASSET.sha256" || die "下载校验文件失败:$SHA_URL"
   cmp -s "$TMP_DL/$ASSET.sha256.pre" "$TMP_DL/$ASSET.sha256" && break
