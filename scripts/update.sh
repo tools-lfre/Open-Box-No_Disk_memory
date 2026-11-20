@@ -62,8 +62,9 @@ set -eu
 umask 022
 
 # ---- 本地定制:仓库指向自己,彻底摆脱原作者仓库 ----
-# 默认从自己的镜像仓库取升级包;可用 OPENBOX_REPO=owner/repo 覆盖。
-REPO="${OPENBOX_REPO:-tools-lfre/Open-Box}"
+# 默认从 Open-Box-No_Disk_memory 仓库取升级包(其 Latest=v0.1.301,跟随 Latest 自动升级);
+# 可用 OPENBOX_REPO=owner/repo 覆盖指向其它镜像。
+REPO="${OPENBOX_REPO:-tools-lfre/Open-Box-No_Disk_memory}"
 INSTALL_ROOT="/opt/open-box"
 # 获取最新升级脚本早于主流程，也需要内置镜像列表，必须先初始化。
 BUILTIN_MIRRORS="
@@ -1411,6 +1412,12 @@ resolve_channel() {
       MIRROR_PREFIX="$CLI_MIRROR_PREFIX"
       ;;
     *)
+      # 本地定制:未通过命令行指定通道时,OPENBOX_CHANNEL=mirror 可强制走加速镜像
+      if [ "$OPENBOX_CHANNEL" = "mirror" ]; then
+        CHANNEL="mirror"
+        MIRROR_PREFIX="${OPENBOX_MIRROR_PREFIX:-}"
+        return 0
+      fi
       read_channel
       ;;
   esac
