@@ -31,7 +31,10 @@ set -eu
 # uhttpd / rpcd 读到,LuCI 的 status.js 曾因此变成 600 而 403(GitHub #103 #106 #110)
 umask 022
 
-REPO="liandu2024/Open-Box"
+# ---- 本地定制:仓库指向自己,彻底摆脱原作者仓库 ----
+# 默认从自己的镜像仓库取安装包;可用 OPENBOX_REPO=owner/repo 覆盖(例如指向另一个自建镜像)。
+# 完全离线时用 OPENBOX_LOCAL_ASSET=<本地 tar.gz 绝对路径> 直接安装,跳过所有网络请求。
+REPO="${OPENBOX_REPO:-tools-lfre/Open-Box}"
 INSTALL_ROOT="/opt/open-box"
 # OpenWrt 的 /tmp 通常是 tmpfs，会把下载包直接计入运行内存。
 # 下载临时目录默认放在 /opt 所在的持久化文件系统；需要时可用 OPENBOX_TMPDIR
@@ -208,7 +211,7 @@ warn_blocking() {
   echo "  建议值:$3" >&2
   echo "  风险:$4" >&2
   echo "  继续安装后若想回退,可运行卸载脚本:" >&2
-  echo "    curl -fsSL https://raw.githubusercontent.com/liandu2024/Open-Box/main/scripts/uninstall.sh | sh -s -- --purge" >&2
+  echo "    curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/uninstall.sh | sh -s -- --purge" >&2
   if [ "$_wb_wait" -gt 0 ] 2>/dev/null; then
     echo "  ${_wb_wait} 秒后自动继续安装,按 Ctrl-C 可中止。" >&2
     _wb_i=0
@@ -454,7 +457,7 @@ check_existing_install() {
     fi
     # 光说"请使用 update.sh"没用:用户照着敲 update.sh 只会得到 not found(真机反馈)。给完整命令。
     die "$INSTALL_ROOT 已存在且包含完整安装。如需升级,请复制下面这条命令运行:
-       curl -fsSL https://raw.githubusercontent.com/liandu2024/Open-Box/main/scripts/update.sh | sh -s -- --mirror
+       curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/update.sh | sh -s -- --mirror
      (也可以在面板或 LuCI → 服务 → Open-Box 页面里点升级。)"
   fi
   info "检测到保留的 $INSTALL_ROOT/data(此前卸载时选择了保留数据),安装将复用它。"
@@ -721,7 +724,7 @@ fetch_to_file() {
 }
 
 # 镜像通道把整条 URL(含协议头)拼在前缀后面,例如:
-#   https://<前缀>/https://github.com/liandu2024/Open-Box/releases/...
+#   https://<前缀>/https://github.com/<REPO>/releases/...
 # 这与设计文档给出的 raw.githubusercontent 加速示例是同一种拼法,直连/api/release 三类
 # URL 统一走这条规则,方便镜像服务按同一套反代规则处理。
 build_url() {
@@ -884,8 +887,34 @@ set_asset_urls() {
 # 直连通道这里就定下来;镜像通道要等选好镜像(探测时用稳定资产名的 .sha256)
 LATEST_TAG=""
 TRUSTED_DIRECT_BROKEN=0
-[ "$CHANNEL" = "mirror" ] || resolve_latest_tag_now
+# ---- 本地定制:离线安装模式 ----
+# 设置 OPENBOX_LOCAL_ASSET=<本机 .tar.gz 绝对路径> 后,完全不访问 GitHub:
+# 版本解析、镜像探测、正文与校验和下载全部跳过,直接用本地包 + 同名 .sha256 校验后安装。
+OPENBOX_LOCAL_ASSET="${OPENBOX_LOCAL_ASSET:-}"
+if [ -n "$OPENBOX_LOCAL_ASSET" ]; then
+  [ -f "$OPENBOX_LOCAL_ASSET" ] || die "本地安装包不存在:$OPENBOX_LOCAL_ASSET"
+  [ -f "$OPENBOX_LOCAL_ASSET.sha256" ] || die "本地安装包缺少同名校验文件:${OPENBOX_LOCAL_ASSET}.sha256"
+  info "离线安装模式:使用本地包 $OPENBOX_LOCAL_ASSET"
+else
+  [ "$CHANNEL" = "mirror" ] || resolve_latest_tag_now
+fi
 set_asset_urls
+if [ -n "$OPENBOX_LOCAL_ASSET" ]; then
+  # 校验文件里记录的名字才是 sha256sum -c 要核对的目标,用它覆盖 ASSET,
+  # 这样无论本地包叫什么(带版本号与否)都能对上校验文件里的文件名。
+  _local_asset_name=$(awk 'NR==1{print $2}' "$OPENBOX_LOCAL_ASSET.sha256" 2>/dev/null | tr -d '\r')
+  case "$_local_asset_name" in
+    ''|*[!A-Za-z0-9._-]*)
+      die "本地校验文件格式异常(第 1 行应含资产名):${OPENBOX_LOCAL_ASSET}.sha256" ;;
+  esac
+  ASSET="$_local_asset_name"
+  # 架构不匹配时提前拦下,避免装错架构的包
+  case "$ASSET" in
+    *"-${ARCH}.tar.gz") : ;;
+    *) die "本地包架构与本机不符:包=$ASSET,本机架构=$ARCH。请选用 ${ARCH} 架构的发布包。" ;;
+  esac
+  info "离线包资产名:$ASSET(架构 $ARCH)"
+fi
 
 # 校验文件(.sha256,几十字节)先直连 GitHub 取,取不到才走镜像:正文走镜像没关系,只要校验和来自 GitHub 本身,
 # 镜像就没法同时换掉正文和校验和(和 update.sh 同一个做法,审查第七项)。内容不像一行哈希的当没取到
@@ -1039,6 +1068,13 @@ fi
 _dl_round=0
 while :; do
   _dl_round=$((_dl_round + 1))
+  if [ -n "$OPENBOX_LOCAL_ASSET" ]; then
+    # 离线模式:从本地复制包与校验和,不改 ASSET(校验文件名与包内记录一致)
+    cp "$OPENBOX_LOCAL_ASSET" "$TMP_DL/$ASSET" || die "复制本地安装包失败:$OPENBOX_LOCAL_ASSET"
+    cp "$OPENBOX_LOCAL_ASSET.sha256" "$TMP_DL/$ASSET.sha256" || die "复制本地校验文件失败"
+    info "已载入本地发布包:$ASSET"
+    break
+  fi
   fetch_to_file_trusted "$SHA_URL" "$TMP_DL/$ASSET.sha256.pre" || die "下载校验文件失败:$SHA_URL"
   info "下载发布包:$ASSET"
   download_asset "$ASSET_URL" "$TMP_DL/$ASSET" || die "下载安装包失败(内置镜像和直连都试过了):$ASSET_URL"
