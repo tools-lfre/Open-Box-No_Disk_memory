@@ -61,7 +61,9 @@ set -eu
 # uhttpd / rpcd 读到,LuCI 的 status.js 曾因此变成 600 而 403(GitHub #103 #106 #110)
 umask 022
 
-REPO="liandu2024/Open-Box"
+# ---- 本地定制:仓库指向自己,彻底摆脱原作者仓库 ----
+# 默认从自己的镜像仓库取升级包;可用 OPENBOX_REPO=owner/repo 覆盖。
+REPO="${OPENBOX_REPO:-tools-lfre/Open-Box}"
 INSTALL_ROOT="/opt/open-box"
 # 获取最新升级脚本早于主流程，也需要内置镜像列表，必须先初始化。
 BUILTIN_MIRRORS="
@@ -1277,7 +1279,7 @@ check_installed() {
   if [ ! -d "$INSTALL_ROOT" ] || [ ! -f "$INSTALL_ROOT/meta.json" ]; then
     # 同上:给能直接照抄的命令,别只说"请使用 install.sh"
     die "未检测到现有 Open-Box 安装($INSTALL_ROOT)。首次安装请复制下面这条命令运行:
-       curl -fsSL https://raw.githubusercontent.com/liandu2024/Open-Box/main/scripts/install.sh | sh -s -- --mirror"
+       curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | sh -s -- --mirror"
   fi
 }
 
@@ -1418,6 +1420,14 @@ resolve_channel() {
 # 获取升级锁之前,LuCI / 面板不会为下载脚本等待,重新执行也不会撞上自己持有的锁。
 # --probe / --cancel 已在上面返回;手动下载到安装目录外的脚本也直接执行(发布验收用)。
 refresh_update_script() {
+  # ---- 本地定制:默认禁用自更新 ----
+  # 接力时会从 REPO 的 release 拉 update.sh 并 exec,而 release 里是上游原版脚本
+  # (无硬件限制补丁),一旦执行就把本地定制冲掉。默认关闭;确需用远端脚本时设
+  # OPENBOX_SELF_UPDATE=1 开启,并自行确保远端脚本已打同样的补丁。
+  if [ "${OPENBOX_SELF_UPDATE:-0}" != "1" ]; then
+    info "本地定制版已禁用自更新,继续使用当前脚本(设置 OPENBOX_SELF_UPDATE=1 可开启)。"
+    return 0
+  fi
   detect_downloader
   ensure_tmp_parent
   resolve_channel
@@ -1809,7 +1819,29 @@ set_asset_urls() {
   fi
   SHA_URL="$ASSET_URL.sha256"
 }
+# ---- 本地定制:离线升级模式 ----
+# OPENBOX_LOCAL_ASSET=<本地 .tar.gz 绝对路径> 时完全不访问 GitHub,用本地包 + 同名
+# .sha256 校验后升级;同时禁用组件按需下载(那会联网),改走完整包路径。
+OPENBOX_LOCAL_ASSET="${OPENBOX_LOCAL_ASSET:-}"
+if [ -n "$OPENBOX_LOCAL_ASSET" ]; then
+  [ -f "$OPENBOX_LOCAL_ASSET" ] || die "本地升级包不存在:$OPENBOX_LOCAL_ASSET"
+  [ -f "$OPENBOX_LOCAL_ASSET.sha256" ] || die "本地升级包缺少同名校验文件:${OPENBOX_LOCAL_ASSET}.sha256"
+  info "离线升级模式:使用本地包 $OPENBOX_LOCAL_ASSET"
+fi
 set_asset_urls
+if [ -n "$OPENBOX_LOCAL_ASSET" ]; then
+  _local_asset_name=$(awk 'NR==1{print $2}' "$OPENBOX_LOCAL_ASSET.sha256" 2>/dev/null | tr -d '\r')
+  case "$_local_asset_name" in
+    ''|*[!A-Za-z0-9._-]*)
+      die "本地校验文件格式异常(第 1 行应含资产名):${OPENBOX_LOCAL_ASSET}.sha256" ;;
+  esac
+  ASSET="$_local_asset_name"
+  case "$ASSET" in
+    *"-${ARCH}.tar.gz") : ;;
+    *) die "本地包架构与本机不符:包=$ASSET,本机架构=$ARCH。" ;;
+  esac
+  info "离线包资产名:$ASSET(架构 $ARCH)"
+fi
 
 OLD_VERSION=$(sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p' "$INSTALL_ROOT/meta.json" 2>/dev/null | head -n 1)
 
@@ -2097,13 +2129,23 @@ preserve_optional_mihomo_in_stage() {
   fi
 }
 
-if [ -x "$INSTALL_ROOT/bin/openbox-panel" ]; then
+if [ -x "$INSTALL_ROOT/bin/openbox-panel" ] && [ -z "$OPENBOX_LOCAL_ASSET" ]; then
+  # 离线模式跳过组件按需下载(会联网),直接走完整包升级
   if prepare_go_component_update; then _COMPONENT_PREPARED=1; fi
 fi
 if [ "$_COMPONENT_PREPARED" = "0" ]; then
 _dl_round=0
 while :; do
   _dl_round=$((_dl_round + 1))
+
+  if [ -n "$OPENBOX_LOCAL_ASSET" ]; then
+    # 离线模式:从本地复制包与校验和,跳过所有网络请求
+    check_cancel_and_abort
+    cp "$OPENBOX_LOCAL_ASSET" "$TMP_DL/$ASSET" || die "复制本地升级包失败:$OPENBOX_LOCAL_ASSET。现有安装未改动。"
+    cp "$OPENBOX_LOCAL_ASSET.sha256" "$TMP_DL/$ASSET.sha256" || die "复制本地校验文件失败。现有安装未改动。"
+    info "已载入本地升级包:$ASSET"
+    break
+  fi
 
   fetch_to_file_trusted "$SHA_URL" "$TMP_DL/$ASSET.sha256.pre" sha || die "下载校验文件失败:${SHA_URL}。现有安装未改动。"
   check_cancel_and_abort
